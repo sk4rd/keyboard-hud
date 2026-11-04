@@ -1,0 +1,8 @@
+{
+    "module_name": "Keyboard HUD",
+    "maintainer": "miko",
+    "license": "GPL-2.0-or-later",
+    "features": {
+        "via": true
+    }
+}

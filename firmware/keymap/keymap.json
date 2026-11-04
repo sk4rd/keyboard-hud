@@ -1,0 +1,7 @@
+{
+    "modules": [
+        "bastardkb/bk_pointing_device",
+        "bastardkb/argos",
+        "miko/keyboard_hud"
+    ]
+}
