@@ -32,7 +32,7 @@ Without the module, the HUD shows "stock firmware: no key or layer data".
 
 ```nix
 {
-  inputs.keyboard-hud.url = "github:<owner>/keyboard-hud";
+  inputs.keyboard-hud.url = "github:sk4rd/keyboard-hud";
 
   # in a NixOS configuration
   imports = [ inputs.keyboard-hud.nixosModules.default ];
