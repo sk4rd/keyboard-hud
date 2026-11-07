@@ -9,7 +9,7 @@ let
   cfg = config.programs.keyboard-hud;
 
   package = cfg.package.override {
-    inherit (cfg) layout theme extraArgs;
+    inherit (cfg) theme extraArgs;
   };
 
   # kglobalaccel picks up shortcut .desktop files from share/kglobalaccel. A
@@ -33,12 +33,7 @@ in
       type = lib.types.package;
       default = pkgs.callPackage ./package.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
-      description = "keyboard-hud package; overridden with layout, theme and extraArgs.";
-    };
-
-    layout = lib.mkOption {
-      type = lib.types.path;
-      description = "Argos layout export (JSON) the HUD draws.";
+      description = "keyboard-hud package; overridden with theme and extraArgs.";
     };
 
     theme = lib.mkOption {

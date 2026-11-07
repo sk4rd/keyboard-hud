@@ -7,8 +7,6 @@
   gtk4-layer-shell,
   writeText,
   makeDesktopItem,
-  # Argos layout export (JSON). Without one, pass --layout at runtime.
-  layout ? null,
   # { background, foreground, palette = { red, green, ... }; } in terminal-theme terms.
   theme ? null,
   # Extra command-line flags baked into the wrapper, e.g. [ "--opacity" "0.5" ].
@@ -64,11 +62,6 @@ python3Packages.buildPythonApplication {
     "LD_PRELOAD"
     ":"
     "${gtk4-layer-shell}/lib/libgtk4-layer-shell.so"
-  ]
-  ++ lib.optionals (layout != null) [
-    "--set-default"
-    "KEYBOARD_HUD_LAYOUT"
-    "${layout}"
   ]
   ++ lib.optionals (extraArgs != [ ]) [
     "--add-flags"

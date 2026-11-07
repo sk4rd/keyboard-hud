@@ -1089,10 +1089,15 @@ class Tray:
 APP_ID = "den.miko.KeyboardHud"
 
 
+def default_layout():
+    config = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(config, "keyboard-hud", "layout.json")
+
+
 def parse_args(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--layout", default=os.environ.get("KEYBOARD_HUD_LAYOUT"),
-                    help="Argos layout export (JSON); defaults to $KEYBOARD_HUD_LAYOUT")
+    ap.add_argument("--layout", default=os.environ.get("KEYBOARD_HUD_LAYOUT") or default_layout(),
+                    help="Argos layout export (JSON); defaults to $KEYBOARD_HUD_LAYOUT, then ~/.config/keyboard-hud/layout.json")
     ap.add_argument("--theme", default=os.environ.get("KEYBOARD_HUD_THEME"), help="theme JSON (background, foreground, palette)")
     ap.add_argument("--vid", type=lambda s: int(s, 16), default=0xA8F8, help="USB vendor id (hex)")
     ap.add_argument("--pid", type=lambda s: int(s, 16), default=0x1833, help="USB product id (hex)")
@@ -1112,8 +1117,8 @@ def parse_args(argv):
 
 
 def load(args):
-    if not args.layout:
-        sys.exit("keyboard-hud: no layout; pass --layout with an Argos export or set KEYBOARD_HUD_LAYOUT")
+    if not os.path.exists(args.layout):
+        sys.exit(f"keyboard-hud: no layout at {args.layout}; put an Argos export there or pass --layout")
     with open(args.layout) as f:
         layout = json.load(f)
     theme = {}

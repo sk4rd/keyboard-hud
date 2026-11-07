@@ -28,6 +28,15 @@ later rebuilds keep it.
 
 Without the module, the HUD shows "stock firmware: no key or layer data".
 
+## Layout
+
+Export your layout from Argos and put it at
+`~/.config/keyboard-hud/layout.json`. A symlink works too, so the file can
+live wherever you keep it. The HUD reads it each time it starts, so a new
+layout needs no rebuild.
+
+`--layout` or `KEYBOARD_HUD_LAYOUT` overrides that path.
+
 ## NixOS
 
 ```nix
@@ -38,7 +47,6 @@ Without the module, the HUD shows "stock firmware: no key or layer data".
   imports = [ inputs.keyboard-hud.nixosModules.default ];
   programs.keyboard-hud = {
     enable = true;
-    layout = ./argos-layout.json;   # Argos → export
     # theme = { background = "#000000"; palette = { blue = "#449fd0"; }; };
     # extraArgs = [ "--opacity" "0.5" ];
     # shortcut = "Meta+Alt+K";      # Plasma global shortcut; null to skip
