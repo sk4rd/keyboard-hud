@@ -82,4 +82,5 @@ start. Dragging moves the HUD within its monitor; use `--monitor`
 
 The HUD draws key labels from the layout's keycodes and colours each key with
 its LED colour from Argos. That way the overlay and the board share one colour
-scheme.
+scheme. Holding Shift shows the shifted labels: `a` becomes `A`, `1` becomes
+`!`, and so on.

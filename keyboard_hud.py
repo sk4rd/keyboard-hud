@@ -133,6 +133,28 @@ def basic_label(code, mods=0):
     return mod_prefix(m) + name
 
 
+def shifted_label(key):
+    """The label a key shows while shift is held, or None if it does not change."""
+    if key.kind not in ("key", "mt", "lt") or key.tap is None:
+        return None
+    if key.kind == "key":
+        if key.mods & MOD_SFT:
+            return None  # the keycode already applies shift
+        if (key.mods & 0x0F, key.tap) in SHORTCUTS:
+            return None  # the label is a shortcut name, not a character
+    name = BASIC.get(key.tap, f"0x{key.tap:02X}")
+    label = SHIFTED.get(key.tap)
+    if label is None:
+        if len(name) != 1 or not name.isalpha():
+            return None
+        label = name.upper()
+    if key.kind in ("mt", "lt"):
+        return label  # key.mods describes the hold, not the tap
+    if key.mods & MOD_ALT and key.mods & MOD_RIGHT:
+        return "AltGr-" + label
+    return mod_prefix(key.mods & ~MOD_SFT) + label
+
+
 class Key:
     """A decoded keycode: what it does on tap, on hold, and how to draw it."""
 
@@ -794,12 +816,13 @@ class Painter:
 
         active = m.active_layers(t) if self.preview is None else {m.default_layer, self.preview}
         top = max(active)
+        shift = bool(m.mods() & MOD_SFT)
         self.draw_header(cr, t, active, top)
         cr.save()
         cr.translate(self.pad, self.pad + self.header_h)
         self.draw_trackball(cr, t)
         for pos, (cx, cy, angle) in GEOMETRY.items():
-            self.draw_key(cr, pos, cx, cy, angle, active, t)
+            self.draw_key(cr, pos, cx, cy, angle, active, t, shift)
         cr.restore()
         self.draw_history(cr, t)
         if self.moving:
@@ -897,7 +920,7 @@ class Painter:
             cr.set_line_width(2.5)
             cr.stroke()
 
-    def draw_key(self, cr, pos, cx, cy, angle, active, t):
+    def draw_key(self, cr, pos, cx, cy, angle, active, t, shift=False):
         m, u = self.m, self.u
         hold = m.held.get(pos) if self.preview is None else None
         if hold is not None:
@@ -939,9 +962,10 @@ class Painter:
             cr.fill()
             if key.kind in ("mo", "tt"):
                 text_color = target
-        main_size = 0.34 * u if len(key.label) <= 2 else 0.25 * u
+        label = (shifted_label(key) if shift else None) or key.label
+        main_size = 0.34 * u if len(label) <= 2 else 0.25 * u
         main_y = -0.08 * u if hold_label else 0
-        self.text(cr, key.label, 0, main_y, main_size, text_color, max_w=size - 0.12 * u, bold=pressed)
+        self.text(cr, label, 0, main_y, main_size, text_color, max_w=size - 0.12 * u, bold=pressed)
         if hold_label:
             hc = self.bg if pressed else (target if key.kind == "lt" and target else self.mod_color)
             self.text(cr, hold_label, 0, 0.27 * u, 0.18 * u, hc, max_w=size - 0.1 * u)
