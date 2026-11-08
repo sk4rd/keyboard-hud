@@ -691,7 +691,11 @@ class Painter:
         # Same hue per layer as the keyboard's lighting: numbers blue, symbols green,
         # navigation yellow. Unnamed layers fall back to the leftover palette colours.
         by_name = {"base": "white", "sym": "green", "num": "blue", "nav": "yellow",
-                   "pointer": "magenta", "game": "red"}
+                   "pointer": "magenta", "game": "red",
+                   # Argos sometimes exports generic names; keep their colours stable.
+                   "lower": "green", "raise": "brightMagenta",
+                   "layer 4": "yellow", "layer 5": "brightGreen",
+                   "layer 6": "brightYellow", "layer 7": "brightRed"}
         spare = iter(["brightBlue", "brightMagenta", "brightCyan", "brightGreen", "brightYellow", "brightRed"])
         self.layer_colors = [rgb(p.get(by_name.get(name) or next(spare, "white"), p["white"]))
                              for name in (model.names + [""] * 8)[:max(8, len(model.names))]]
@@ -701,6 +705,11 @@ class Painter:
         self.width = int(BOARD_W * self.u + 2 * self.pad)
         self.height = int(self.header_h + BOARD_H * self.u + self.history_h + 2 * self.pad)
         self.preview = None
+        self.moving = False
+
+    def set_opacity(self, value):
+        self.opacity = max(0.1, min(1.0, float(value)))
+        self.key_alpha = min(1.0, self.opacity + 0.15)
 
     def layer_color(self, n):
         return self.layer_colors[n % len(self.layer_colors)]
@@ -793,6 +802,26 @@ class Painter:
             self.draw_key(cr, pos, cx, cy, angle, active, t)
         cr.restore()
         self.draw_history(cr, t)
+        if self.moving:
+            self.draw_move_hint(cr)
+
+    def draw_move_hint(self, cr):
+        """A border and hint while the HUD accepts pointer input for dragging."""
+        u = self.u
+        self.rounded(cr, 1, 1, self.width - 2, self.height - 2, 0.3 * u)
+        cr.set_source_rgb(*self.mod_color)
+        cr.set_line_width(2)
+        cr.stroke()
+        label = "drag to move · right-click to lock"
+        size = 0.26 * u
+        w = self.text_width(cr, label, size)
+        pad = 0.18 * u
+        x = (self.width - w) / 2 - pad
+        y = self.height - self.pad - self.history_h / 2 + 0.05 * u
+        self.rounded(cr, x, y - 0.17 * u, w + 2 * pad, 0.34 * u, 0.17 * u)
+        cr.set_source_rgba(*self.key_bg, 0.95)
+        cr.fill()
+        self.text(cr, label, self.width / 2, y, size, self.mod_color)
 
     def draw_header(self, cr, t, active, top):
         m, u = self.m, self.u
@@ -990,16 +1019,17 @@ MENU_XML = """
 
 class Tray:
     """A StatusNotifierItem (the protocol behind KDE's system tray) whose menu
-    closes the HUD. Re-registers when plasmashell restarts; does nothing on
-    desktops without a StatusNotifierWatcher."""
+    closes the HUD or toggles move mode. Re-registers when plasmashell restarts;
+    does nothing on desktops without a StatusNotifierWatcher."""
 
     SNI_PATH, MENU_PATH = "/StatusNotifierItem", "/MenuBar"
-    CLOSE_ID = 1
+    CLOSE_ID, MOVE_ID = 1, 2
 
-    def __init__(self, connection, on_close):
+    def __init__(self, connection, on_close, on_move, is_moving):
         from gi.repository import Gio, GLib
         self.Gio, self.GLib = Gio, GLib
         self.conn, self.on_close = connection, on_close
+        self.on_move, self.is_moving = on_move, is_moving
         self.name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
         sni = Gio.DBusNodeInfo.new_for_xml(SNI_XML).interfaces[0]
         menu = Gio.DBusNodeInfo.new_for_xml(MENU_XML).interfaces[0]
@@ -1032,7 +1062,7 @@ class Tray:
             "Title": V("s", "Keyboard HUD"),
             "Status": V("s", "Active"),
             "IconName": V("s", "input-keyboard"),
-            "ToolTip": V("(sa(iiay)ss)", ("input-keyboard", [], "Keyboard HUD", "Click to close the overlay")),
+            "ToolTip": V("(sa(iiay)ss)", ("input-keyboard", [], "Keyboard HUD", "Click to close; use the menu to move")),
             "ItemIsMenu": V("b", True),
             "Menu": V("o", self.MENU_PATH),
         }.get(prop)
@@ -1048,7 +1078,12 @@ class Tray:
     def item(self, item_id):
         V = self.GLib.Variant
         if item_id == 0:
-            return (0, {"children-display": V("s", "submenu")}, [V("(ia{sv}av)", self.item(self.CLOSE_ID))])
+            return (0, {"children-display": V("s", "submenu")},
+                    [V("(ia{sv}av)", self.item(self.MOVE_ID)), V("(ia{sv}av)", self.item(self.CLOSE_ID))])
+        if item_id == self.MOVE_ID:
+            moving = self.is_moving()
+            return (self.MOVE_ID, {"label": V("s", "Lock HUD" if moving else "Move HUD"),
+                                   "icon-name": V("s", "changes-prevent" if moving else "transform-move")}, [])
         return (self.CLOSE_ID, {"label": V("s", "Close keyboard HUD"), "icon-name": V("s", "window-close")}, [])
 
     def menu_prop(self, _conn, _sender, _path, _iface, prop):
@@ -1062,19 +1097,25 @@ class Tray:
         if method == "GetLayout":
             invocation.return_value(V("(u(ia{sv}av))", (1, self.item(0))))
         elif method == "GetGroupProperties":
-            ids = [i for i in args[0] if i in (0, self.CLOSE_ID)] or [0, self.CLOSE_ID]
+            ids = [i for i in args[0] if i in (0, self.CLOSE_ID, self.MOVE_ID)] or [0, self.MOVE_ID, self.CLOSE_ID]
             invocation.return_value(V("(a(ia{sv}))", ([self.item(i)[:2] for i in ids],)))
         elif method == "GetProperty":
             props = self.item(args[0])[1]
             invocation.return_value(V("(v)", (props.get(args[1], V("s", "")),)))
         elif method == "Event":
-            if args[0] == self.CLOSE_ID and args[1] == "clicked":
-                self.GLib.idle_add(self.on_close)
+            if args[1] == "clicked":
+                if args[0] == self.CLOSE_ID:
+                    self.GLib.idle_add(self.on_close)
+                elif args[0] == self.MOVE_ID:
+                    self.GLib.idle_add(self.on_move)
             invocation.return_value(None)
         elif method == "EventGroup":
             for item_id, event, _data, _ts in args[0]:
-                if item_id == self.CLOSE_ID and event == "clicked":
-                    self.GLib.idle_add(self.on_close)
+                if event == "clicked":
+                    if item_id == self.CLOSE_ID:
+                        self.GLib.idle_add(self.on_close)
+                    elif item_id == self.MOVE_ID:
+                        self.GLib.idle_add(self.on_move)
             invocation.return_value(V("(ai)", ([],)))
         elif method == "AboutToShow":
             invocation.return_value(V("(b)", (False,)))
@@ -1089,9 +1130,56 @@ class Tray:
 APP_ID = "den.miko.KeyboardHud"
 
 
+def config_dir():
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "keyboard-hud")
+
+
 def default_layout():
-    config = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return os.path.join(config, "keyboard-hud", "layout.json")
+    return os.path.join(config_dir(), "layout.json")
+
+
+def position_path():
+    return os.path.join(config_dir(), "position.json")
+
+
+def load_position():
+    """The last locked position and opacity, or None if missing or malformed."""
+    try:
+        with open(position_path()) as f:
+            data = json.load(f)
+        monitor = data.get("monitor")
+        opacity = data.get("opacity")
+        if isinstance(opacity, (int, float)):
+            opacity = max(0.1, min(1.0, float(opacity)))
+        else:
+            opacity = None
+        return {"x": int(data["x"]), "y": int(data["y"]),
+                "monitor": monitor if isinstance(monitor, str) else None,
+                "opacity": opacity}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def save_position(x, y, monitor, opacity):
+    path = position_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"x": int(x), "y": int(y), "monitor": monitor,
+                       "opacity": round(float(opacity), 3)}, f)
+        os.replace(tmp, path)
+    except OSError as e:
+        print(f"keyboard-hud: cannot save position: {e}", file=sys.stderr)
+
+
+def clear_position():
+    try:
+        os.unlink(position_path())
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"keyboard-hud: cannot remove position: {e}", file=sys.stderr)
 
 
 def parse_args(argv):
@@ -1104,9 +1192,16 @@ def parse_args(argv):
     ap.add_argument("--poll-hz", type=float, default=200, help="matrix polling rate")
     ap.add_argument("--auto-mouse-layer", type=int, help="layer the trackball activates (default: 'pointer')")
     ap.add_argument("--scale", type=float, default=1.0)
-    ap.add_argument("--opacity", type=float, default=0.6, help="background opacity, 0-1 (keys are slightly more opaque)")
-    ap.add_argument("--position", choices=["bottom", "top", "bottom-left", "bottom-right", "top-left", "top-right"], default="bottom")
+    ap.add_argument("--opacity", type=float, default=None,
+                    help="initial background opacity, 0-1; scroll in move mode to adjust")
+    ap.add_argument("--position", choices=["bottom", "top", "bottom-left", "bottom-right", "top-left", "top-right"],
+                    help="initial placement; defaults to the saved position, then bottom")
+    ap.add_argument("--monitor", help="monitor connector name (e.g. DP-1); defaults to the saved monitor, then the first")
     ap.add_argument("--margin", type=int, default=24)
+    ap.add_argument("--move", action="store_true",
+                    help="start in move mode, or toggle move mode of a running HUD")
+    ap.add_argument("--reset-position", action="store_true",
+                    help="forget the saved position and opacity, and use --position (default: bottom)")
     ap.add_argument("--interactive", action="store_true",
                     help="accept clicks: click a layer to preview it, right-click to close")
     ap.add_argument("--no-tray", action="store_true", help="do not show a system tray icon")
@@ -1126,7 +1221,8 @@ def load(args):
         with open(args.theme) as f:
             theme = json.load(f)
     model = Model(layout, args.auto_mouse_layer)
-    return model, Painter(model, theme, args.scale, args.opacity)
+    opacity = 0.6 if args.opacity is None else args.opacity
+    return model, Painter(model, theme, args.scale, opacity)
 
 
 def snapshot(args):
@@ -1155,7 +1251,11 @@ def run(args):
     import cairo
 
     model, painter = load(args)
-    state = {"win": None, "device": None, "tray": None}
+    state = {
+        "win": None, "device": None, "tray": None, "area": None,
+        "moving": False, "pos": [0, 0], "monitor": None, "move_cache": None,
+        "drag": None, "left_click": None, "scroll": None,
+    }
 
     def post(kind, *payload):
         GLib.idle_add(handle, kind, payload, time.monotonic())
@@ -1179,14 +1279,186 @@ def run(args):
             model.rev += 1
         return False
 
-    def build(app):
+    def monitor_name(monitor):
+        if monitor is None:
+            return None
+        return monitor.get_connector() or monitor.get_model()
+
+    def choose_monitor(display, saved):
+        if display is None:
+            return None
+        monitors = display.get_monitors()
+        wanted = args.monitor or (saved.get("monitor") if saved else None)
+        if wanted:
+            for i in range(monitors.get_n_items()):
+                monitor = monitors.get_item(i)
+                if monitor_name(monitor) == wanted:
+                    return monitor
+        return monitors.get_item(0) if monitors.get_n_items() else None
+
+    def clamp_position(x, y):
+        monitor = state["monitor"]
+        if monitor is None:
+            return [int(x), int(y)]
+        geometry = monitor.get_geometry()
+        max_x = max(0, geometry.width - painter.width)
+        max_y = max(0, geometry.height - painter.height)
+        return [max(0, min(int(x), max_x)), max(0, min(int(y), max_y))]
+
+    def initial_position(monitor, saved):
+        if monitor is None:
+            return [0, 0]
+        geometry = monitor.get_geometry()
+        if saved is not None and args.position is None:
+            return clamp_position(saved["x"], saved["y"])
+        place = args.position or "bottom"
+        margin = args.margin
+        x = (geometry.width - painter.width) // 2
+        y = geometry.height - painter.height - margin
+        if "left" in place:
+            x = margin
+        elif "right" in place:
+            x = geometry.width - painter.width - margin
+        if place.startswith("top"):
+            y = margin
+        return clamp_position(x, y)
+
+    def save_current_position():
+        save_position(state["pos"][0], state["pos"][1], monitor_name(state["monitor"]), painter.opacity)
+
+    def apply_input_region():
+        win = state["win"]
+        if win is None:
+            return
+        surface = win.get_surface()
+        if surface is None:
+            return
+        if state["moving"] or args.interactive:
+            region = cairo.Region(cairo.RectangleInt(0, 0, painter.width, painter.height))
+        else:
+            region = cairo.Region()
+        surface.set_input_region(region)
+
+    def set_position(win, pos):
+        if LayerShell is None or not LayerShell.is_supported():
+            return
+        LayerShell.set_margin(win, LayerShell.Edge.LEFT, int(pos[0]))
+        LayerShell.set_margin(win, LayerShell.Edge.TOP, int(pos[1]))
+
+    def set_normal_geometry(win, pos):
+        if LayerShell is None or not LayerShell.is_supported():
+            return
+        LayerShell.set_anchor(win, LayerShell.Edge.BOTTOM, False)
+        LayerShell.set_anchor(win, LayerShell.Edge.RIGHT, False)
+        LayerShell.set_anchor(win, LayerShell.Edge.TOP, True)
+        LayerShell.set_anchor(win, LayerShell.Edge.LEFT, True)
+        LayerShell.set_margin(win, LayerShell.Edge.RIGHT, 0)
+        LayerShell.set_margin(win, LayerShell.Edge.BOTTOM, 0)
+        set_position(win, pos)
+        win.set_default_size(painter.width, painter.height)
+
+    def move_to(x, y):
+        state["pos"] = clamp_position(x, y)
+        if state["win"] is not None:
+            set_position(state["win"], state["pos"])
+
+    def set_gestures(moving):
+        # Only the gesture that makes sense in the current mode receives events.
+        if state["drag"] is not None:
+            state["drag"].set_propagation_phase(Gtk.PropagationPhase.BUBBLE if moving else Gtk.PropagationPhase.NONE)
+        if state["left_click"] is not None:
+            state["left_click"].set_propagation_phase(Gtk.PropagationPhase.NONE if moving else Gtk.PropagationPhase.BUBBLE)
+        if state["scroll"] is not None:
+            state["scroll"].set_propagation_phase(Gtk.PropagationPhase.BUBBLE if moving else Gtk.PropagationPhase.NONE)
+
+    def render_move_cache():
+        # The HUD content is static during a drag; blitting this image keeps the
+        # frame clock at the monitor refresh rate. Re-render it when opacity changes.
+        scale = state["monitor"].get_scale_factor() if state["monitor"] is not None else 1
+        cache = cairo.ImageSurface(cairo.FORMAT_ARGB32, painter.width * scale, painter.height * scale)
+        cache_cr = cairo.Context(cache)
+        cache_cr.scale(scale, scale)
+        painter.draw(cache_cr, time.monotonic())
+        state["move_cache"] = (cache, scale)
+
+    def enter_move():
+        if state["moving"] or state["win"] is None:
+            return
+        state["moving"] = True
+        painter.moving = True
+        set_gestures(True)
+        render_move_cache()
+        win = state["win"]
+        if LayerShell is not None and LayerShell.is_supported():
+            LayerShell.set_keyboard_mode(win, LayerShell.KeyboardMode.ON_DEMAND)
+        if state["area"] is not None:
+            state["area"].set_cursor(Gdk.Cursor.new_from_name("move", None))
+            state["area"].queue_draw()
+        apply_input_region()
+
+    def exit_move():
+        if not state["moving"]:
+            return
+        state["moving"] = False
+        painter.moving = False
+        state["move_cache"] = None
+        set_gestures(False)
+        win = state["win"]
+        if LayerShell is not None and LayerShell.is_supported():
+            save_current_position()
+            if win is not None:
+                set_position(win, state["pos"])
+                LayerShell.set_keyboard_mode(win, LayerShell.KeyboardMode.NONE)
+        if state["area"] is not None:
+            state["area"].set_cursor(None)
+            state["area"].queue_draw()
+        apply_input_region()
+
+    def toggle_move():
+        if state["moving"]:
+            exit_move()
+        else:
+            enter_move()
+
+    def quit_app():
+        if state["moving"]:
+            exit_move()
+        app.quit()
+        return False
+
+    def build(app, start_moving=False):
         win = Gtk.ApplicationWindow(application=app, title="Keyboard HUD", decorated=False, resizable=False)
         css = Gtk.CssProvider()
         css.load_from_data(b"window, .background { background: transparent; }")
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         area = Gtk.DrawingArea(content_width=painter.width, content_height=painter.height)
-        area.set_draw_func(lambda _a, cr, _w, _h: painter.draw(cr, time.monotonic()))
+
+        def draw_func(_area, cr, _w, _h):
+            cache = state["move_cache"]
+            if state["moving"] and cache is not None:
+                surface, scale = cache
+                cr.set_operator(cairo.OPERATOR_CLEAR)
+                cr.paint()
+                cr.set_operator(cairo.OPERATOR_OVER)
+                cr.save()
+                cr.scale(1 / scale, 1 / scale)
+                cr.set_source_surface(surface, 0, 0)
+                cr.paint()
+                cr.restore()
+            else:
+                painter.draw(cr, time.monotonic())
+        area.set_draw_func(draw_func)
         win.set_child(area)
+        state["area"] = area
+
+        if args.reset_position:
+            clear_position()
+        saved = load_position()
+        if args.opacity is None and saved is not None and saved.get("opacity") is not None:
+            painter.set_opacity(saved["opacity"])
+        monitor = choose_monitor(Gdk.Display.get_default(), saved)
+        state["monitor"] = monitor
+        state["pos"] = initial_position(monitor, saved)
 
         if LayerShell is not None and LayerShell.is_supported():
             LayerShell.init_for_window(win)
@@ -1194,31 +1466,91 @@ def run(args):
             LayerShell.set_layer(win, LayerShell.Layer.OVERLAY)
             LayerShell.set_keyboard_mode(win, LayerShell.KeyboardMode.NONE)
             LayerShell.set_exclusive_zone(win, -1)
-            edges = {"bottom": LayerShell.Edge.BOTTOM, "top": LayerShell.Edge.TOP,
-                     "left": LayerShell.Edge.LEFT, "right": LayerShell.Edge.RIGHT}
-            for part in args.position.split("-"):
-                LayerShell.set_anchor(win, edges[part], True)
-                LayerShell.set_margin(win, edges[part], args.margin)
+            if monitor is not None:
+                LayerShell.set_monitor(win, monitor)
+            set_normal_geometry(win, state["pos"])
         else:
             print("keyboard-hud: layer-shell unavailable, using a plain window", file=sys.stderr)
 
-        if args.interactive:
-            click = Gtk.GestureClick(button=0)
+        left_click = Gtk.GestureClick(button=1)
 
-            def on_click(gesture, _n, x, y):
-                if gesture.get_current_button() == 3:
-                    app.quit()
-                    return
-                hit = layer_at(x, y)
-                painter.preview = None if hit is None or hit == painter.preview else hit
-            click.connect("pressed", on_click)
-            area.add_controller(click)
-        else:
-            def clear_input(_w):
+        def on_left_click(_gesture, _n, x, y):
+            if not args.interactive or state["moving"]:
+                return
+            hit = layer_at(x, y)
+            painter.preview = None if hit is None or hit == painter.preview else hit
+        left_click.connect("pressed", on_left_click)
+        area.add_controller(left_click)
+        state["left_click"] = left_click
+
+        right_click = Gtk.GestureClick(button=3)
+
+        def on_right_click(_gesture, _n, _x, _y):
+            if state["moving"]:
+                exit_move()
+            elif args.interactive:
+                quit_app()
+        right_click.connect("pressed", on_right_click)
+        area.add_controller(right_click)
+
+        drag = Gtk.GestureDrag(button=1)
+
+        def on_drag_begin(gesture, start_x, start_y):
+            if not state["moving"]:
+                gesture.set_state(Gtk.EventSequenceState.DENIED)
+                return
+            if LayerShell is None or not LayerShell.is_supported():
                 surface = win.get_surface()
-                if surface is not None:
-                    surface.set_input_region(cairo.Region())
-            win.connect("map", clear_input)
+                device = gesture.get_current_event_device()
+                timestamp = gesture.get_current_event_time()
+                if isinstance(surface, Gdk.Toplevel) and device is not None:
+                    surface.begin_move(device, 1, start_x, start_y, timestamp)
+
+        def on_drag_update(_gesture, offset_x, offset_y):
+            if not state["moving"]:
+                return
+            if LayerShell is None or not LayerShell.is_supported():
+                return
+            # The gesture offset is relative to the moving window, so adding it to the
+            # current position keeps the drag going even when the pointer leaves the HUD.
+            move_to(state["pos"][0] + offset_x, state["pos"][1] + offset_y)
+
+        def on_drag_end(_gesture, _offset_x, _offset_y):
+            if state["moving"] and LayerShell is not None and LayerShell.is_supported():
+                save_current_position()
+
+        drag.connect("drag-begin", on_drag_begin)
+        drag.connect("drag-update", on_drag_update)
+        drag.connect("drag-end", on_drag_end)
+        area.add_controller(drag)
+        state["drag"] = drag
+
+        scroll = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.VERTICAL)
+
+        def on_scroll(_controller, _dx, dy):
+            if not state["moving"]:
+                return False
+            painter.set_opacity(painter.opacity - dy * 0.05)
+            render_move_cache()
+            if state["area"] is not None:
+                state["area"].queue_draw()
+            return True
+        scroll.connect("scroll", on_scroll)
+        area.add_controller(scroll)
+        state["scroll"] = scroll
+        set_gestures(state["moving"])
+
+        key = Gtk.EventControllerKey()
+
+        def on_key(_controller, keyval, _keycode, _mods):
+            if state["moving"] and keyval == Gdk.KEY_Escape:
+                exit_move()
+                return True
+            return False
+        key.connect("key-pressed", on_key)
+        win.add_controller(key)
+
+        win.connect("map", lambda _w: apply_input_region())
 
         drawn = {"rev": None, "t": 0.0, "preview": None}
 
@@ -1227,7 +1559,9 @@ def run(args):
             model.tick(t)
             anim = painter.animating(t)
             changed = drawn["rev"] != model.rev or drawn["preview"] != painter.preview
-            if changed or anim == "fast" or (anim == "slow" and t - drawn["t"] > 0.25):
+            # Keep the frame clock at the monitor refresh rate while dragging. The draw
+            # function only blits the cached HUD image, so this stays cheap.
+            if state["moving"] or changed or anim == "fast" or (anim == "slow" and t - drawn["t"] > 0.25):
                 drawn.update(rev=model.rev, t=t, preview=painter.preview)
                 area.queue_draw()
             return True
@@ -1239,9 +1573,11 @@ def run(args):
         state["device"] = device
         if not args.no_tray and app.get_dbus_connection() is not None:
             try:
-                state["tray"] = Tray(app.get_dbus_connection(), lambda: app.quit() or False)
+                state["tray"] = Tray(app.get_dbus_connection(), quit_app, toggle_move, lambda: state["moving"])
             except Exception as e:  # the overlay works without a tray icon
                 print(f"keyboard-hud: no tray icon: {e}", file=sys.stderr)
+        if start_moving:
+            enter_move()
         win.present()
 
     def layer_at(x, y):
@@ -1253,13 +1589,27 @@ def run(args):
                 return n
         return None
 
-    app = Gtk.Application(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+    app = Gtk.Application(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+    app.add_main_option("move", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+                        "Toggle move mode", None)
+
+    def on_command_line(_app, command_line):
+        move = command_line.get_options_dict().lookup_value("move", None) is not None
+        if state["win"] is None:
+            build(_app, start_moving=move)
+        elif move:
+            toggle_move()
+        else:
+            quit_app()  # a second launch toggles the HUD off
+        return 0
+
+    app.connect("command-line", on_command_line)
 
     def on_activate(app):
         if state["win"] is None:
             build(app)
         else:
-            app.quit()  # a second launch toggles the HUD off
+            quit_app()
     app.connect("activate", on_activate)
     try:
         gi.require_version("GLibUnix", "2.0")
@@ -1268,8 +1618,8 @@ def run(args):
     except (ValueError, ImportError):
         add_signal = GLib.unix_signal_add
     for signum in (2, 15):  # SIGINT, SIGTERM
-        add_signal(GLib.PRIORITY_DEFAULT, signum, lambda: app.quit() or False)
-    status = app.run([sys.argv[0]])
+        add_signal(GLib.PRIORITY_DEFAULT, signum, lambda: quit_app() or False)
+    status = app.run([sys.argv[0]] + (["--move"] if args.move else []))
     if state["tray"]:
         state["tray"].close()
     if state["device"]:

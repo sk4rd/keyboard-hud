@@ -24,6 +24,18 @@ let
     StartupNotify=false
     X-KDE-Shortcuts=${cfg.shortcut}
   '';
+
+  # --move toggles move mode on the running HUD instead of closing it.
+  moveShortcutFile = pkgs.writeTextDir "share/kglobalaccel/keyboard-hud-move.desktop" ''
+    [Desktop Entry]
+    Type=Application
+    Name=Keyboard HUD Move
+    Exec=${lib.getExe package} --move
+    Icon=transform-move
+    Terminal=false
+    StartupNotify=false
+    X-KDE-Shortcuts=${cfg.moveShortcut}
+  '';
 in
 {
   options.programs.keyboard-hud = {
@@ -65,6 +77,13 @@ in
       description = "Plasma global shortcut that toggles the HUD, or null for none.";
     };
 
+    moveShortcut = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "Meta+Alt+Shift+K";
+      description = "Plasma global shortcut that toggles move mode, or null for none.";
+    };
+
     hidrawAccess = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -76,8 +95,14 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ package ] ++ lib.optional (cfg.shortcut != null) shortcut;
-    environment.pathsToLink = lib.mkIf (cfg.shortcut != null) [ "/share/kglobalaccel" ];
+    environment.systemPackages = [
+      package
+    ]
+    ++ lib.optional (cfg.shortcut != null) shortcut
+    ++ lib.optional (cfg.moveShortcut != null) moveShortcutFile;
+    environment.pathsToLink = lib.mkIf (cfg.shortcut != null || cfg.moveShortcut != null) [
+      "/share/kglobalaccel"
+    ];
 
     services.udev.extraRules = lib.mkIf cfg.hidrawAccess ''
       KERNEL=="hidraw*", ATTRS{idVendor}=="a8f8", MODE="0660", GROUP="users", TAG+="uaccess"
